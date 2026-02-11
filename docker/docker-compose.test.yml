@@ -1,0 +1,135 @@
+networks:
+  besu-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+services:
+
+  tester:
+    image: alpine/besu-tester
+    container_name: besu-tester
+    environment:
+      - HELPERS_FILE=${HELPERS_FILE:-}
+      - TEST_FILE=${TEST_FILE:-}
+      - ADDRESS_FILE=${ADDRESS_FILE:-}
+      - GENESIS_FILE=${GENESIS_FILE:-}
+    volumes:
+      - ${HELPERS_FILE:-/dev/null}:/app/helpers.bash:ro
+      - ${TEST_FILE:-/dev/null}:/app/tests.bats:ro
+      - ${CA_CERT_FILE:-/dev/null}:/app/ca.pem:ro
+      - ${ADDRESS_FILE:-/dev/null}:/app/key.adr:ro
+      - ${GENESIS_FILE:-/dev/null}:/app/genesis.json:ro
+    networks:
+      - besu-net
+
+  rpc-node:
+    image: besu/local-image
+    command:
+      - --network=dev
+      - --host-allowlist=*
+      - --rpc-http-enabled
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,WEB3
+    networks:
+      besu-net:
+        ipv4_address: 172.28.0.2
+
+  rpc-node-auth:
+    image: besu/local-image
+    environment:
+      - AUTH_FILE=${AUTH_FILE:-}
+    volumes:
+      - ${AUTH_FILE:-/dev/null}:/app/auth.toml
+    command:
+      - --network=dev
+      - --rpc-http-enabled
+      - --host-allowlist=*
+      - --rpc-http-authentication-credentials-file=/app/auth.toml
+      - --rpc-http-authentication-enabled=true
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,WEB3
+    networks:
+      besu-net:
+        ipv4_address: 172.28.0.3
+
+  rpc-node-tls:
+    image: besu/local-image
+    environment:
+      - P12_FILE=${P12_FILE:-}
+      - P12_PASS_FILE=${P12_PASS_FILE:-}
+    volumes:
+      - ${P12_FILE:-/dev/null}:/app/cert.p12
+      - ${P12_PASS_FILE:-/dev/null}:/app/pass.txt
+    command:
+      - --network=dev
+      - --host-allowlist=*
+      - --rpc-http-enabled=true
+      - --rpc-http-tls-enabled=true
+      - --rpc-http-tls-keystore-file=/app/cert.p12
+      - --rpc-http-tls-keystore-password-file=/app/pass.txt
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,WEB3
+      - --logging=ALL
+    networks:
+      besu-net:
+        ipv4_address: 172.28.0.4
+
+  p2p-node-1:
+    image: besu/local-image
+    command:
+      - --discovery-enabled=true
+      - --network=dev
+      - --rpc-http-enabled
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,WEB3,ADMIN
+      - --host-allowlist=*
+      - --p2p-enabled=true
+      - --p2p-host=172.28.0.5
+      - --p2p-port=30303
+    networks:
+      besu-net:
+        ipv4_address: 172.28.0.5
+
+  p2p-node-2:
+    image: besu/local-image
+    command:
+      - --discovery-enabled=true
+      - --network=dev
+      - --rpc-http-enabled
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,WEB3,ADMIN
+      - --host-allowlist=*
+      - --p2p-enabled=true
+      - --p2p-host=172.28.0.6
+      - --p2p-port=30303
+    networks:
+      besu-net:
+        ipv4_address: 172.28.0.6
+
+  genesis-node:
+    image: besu/local-image
+    environment:
+      - GENESIS_FILE=${GENESIS_FILE:-}
+      - KEY_FILE=${KEY_FILE:-}
+    volumes:
+      - ${GENESIS_FILE:-/dev/null}:/app/genesis.json:ro
+      - ${KEY_FILE:-/dev/null}:/app/key:ro
+    command:
+      - --genesis-file=/app/genesis.json
+      - --host-allowlist=*
+      - --node-private-key-file=/app/key
+      - --rpc-http-enabled
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,WEB3,QBFT
+      - --logging=ALL
+    networks:
+      besu-net:
+        ipv4_address: 172.28.0.7

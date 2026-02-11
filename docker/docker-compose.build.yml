@@ -1,0 +1,160 @@
+services:
+
+  #
+  alpine-besu-tester:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM alpine:${ALPINE_VERSION:-}
+        RUN apk add --no-cache \
+            bash=5.2.37-r0 \
+            bats=1.11.1-r0 \
+            curl=8.14.1-r2 \
+            jq=1.7.1-r0
+        WORKDIR "/app"
+        ENTRYPOINT ["bats","-r","/app/tests.bats"]
+    image:
+      alpine/besu-tester
+
+  #
+  alpine-besu-utils:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM alpine:${ALPINE_VERSION:-}
+        RUN apk add --no-cache jq openssl apache2-utils
+        WORKDIR /app
+    image: alpine/besu-utils
+
+  #
+  besu-local-image:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM hyperledger/besu:${BESU_VERSION:-}
+    image: besu/local-image
+
+
+  #
+  rescale-base-image:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM hyperledger/besu:${BESU_VERSION:-}
+        USER root
+        WORKDIR /app
+
+        RUN cat > /entrypoint.sh <<'EOF'
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        app_dir="/app"
+        key_dir="$${app_dir}/node/key"
+        cert_dir="$${app_dir}/node/cert"
+        data_dir="$${app_dir}/node/data"
+
+        bootnodes_file="$${app_dir}/node/bootnodes.txt"
+
+        genesis_file="$${app_dir}/genesis.json"
+        auth_file="$${app_dir}/node/auth.toml"
+        node_key_file="$${key_dir}/key"
+        tls_keystore_file="$${cert_dir}/cert.p12"
+        tls_password_file="$${cert_dir}/password.txt"
+
+        echo "🔧 Initializing Besu node..."
+
+        mkdir -p "$${data_dir}"
+
+        if [ ! -f "$${genesis_file}" ]; then
+          echo "❌ ERROR: missing $${genesis_file}." >&2
+          exit 1
+        fi
+        echo "✅ Genesis file found"
+        
+        if [ ! -f "$${node_key_file}" ]; then
+          echo "❌ ERROR: missing $${node_key_file}." >&2
+          exit 1
+        fi
+        echo "✅ Node key file found"
+
+        # "--logging=ALL"
+        besu_args=(
+          "--genesis-file=$${genesis_file}"
+          "--data-path=$${data_dir}"
+          "--node-private-key-file=$${node_key_file}"
+          "--rpc-http-enabled=true"
+          "--rpc-http-host=0.0.0.0"
+          "--rpc-http-port=8545"
+          "--rpc-http-api=ETH,NET,WEB3,ADMIN,QBFT"
+          "--host-allowlist=*"
+          "--rpc-ws-enabled=false"
+          "--graphql-http-enabled=false"
+          "--sync-min-peers=1"
+        )
+
+        if [ -f "$${bootnodes_file}" ]; then
+          bootnodes="$$(grep -vE '^[[:space:]]*(#|$$)' "$${bootnodes_file}" \
+            | tr -d '\r' \
+            | tr -d '[:space:]' \
+            | paste -sd, - 2>/dev/null || true)"
+          if [ -n "$${bootnodes}" ]; then
+            echo "🧭 Bootnodes loaded from $${bootnodes_file}"
+            besu_args+=(
+              "--bootnodes=$${bootnodes}"
+            )
+          else
+            echo "ℹ️  Bootnodes file present but empty after filtering ($${bootnodes_file})"
+          fi
+        else
+          echo "ℹ️  No bootnodes file mounted ($${bootnodes_file})"
+        fi
+
+        if [ -n "$${P2P_DISCOVERY:-}" ]; then
+          echo "🌐 Enabling P2P discovery on $${P2P_DISCOVERY}:30303"
+          besu_args+=(
+            "--p2p-enabled=true"
+            "--p2p-host=$${P2P_DISCOVERY}"
+            "--p2p-port=30303"
+          )
+        else
+          echo "🔒 P2P discovery disabled"
+          besu_args+=(
+            "--p2p-enabled=false"
+            "--discovery-enabled=false"
+          )
+        fi
+
+        if [ -f "$${auth_file}" ]; then
+          echo "🔐 Enabling RPC authentication"
+          besu_args+=(
+            "--rpc-http-authentication-enabled=true"
+            "--rpc-http-authentication-credentials-file=$${auth_file}"
+          )
+        else
+          echo "ℹ️  RPC authentication not configured"
+        fi
+
+        if [ -f "$${tls_keystore_file}" ] && [ -f "$${tls_password_file}" ]; then
+          echo "🔒 Enabling TLS with keystore and password"
+          besu_args+=(
+            "--rpc-http-tls-enabled=true"
+            "--rpc-http-tls-keystore-file=$${tls_keystore_file}"
+            "--rpc-http-tls-keystore-password-file=$${tls_password_file}"
+          )
+        else
+          echo "ℹ️  TLS not activated (keystore or password file missing)"
+        fi
+
+        echo "🚀 Starting Besu node..."
+        echo "   Data directory: $${data_dir}"
+        echo ""
+
+        exec besu "$${besu_args[@]}" > "$${data_dir}/.log" 2>&1
+        EOF
+
+        RUN chmod +x /entrypoint.sh && chown besu:besu /entrypoint.sh
+        RUN mkdir -p /app && chown -R besu:besu /app
+
+        USER besu
+        ENTRYPOINT ["/bin/bash", "/entrypoint.sh"]
+    image: rescale/base-image

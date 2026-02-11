@@ -1,0 +1,394 @@
+services:
+
+  besu-export-address:
+    image: besu/local-image
+    environment:
+      - OUTPUT_FOLDER=${OUTPUT_FOLDER:-}
+      - KEY_FILE=${KEY_FILE:-}
+    volumes:
+      - ${OUTPUT_FOLDER:-/tmp}:/app/out
+      - ${KEY_FILE:-/dev/null}:/app/key:ro
+    working_dir: /app
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        besu public-key export-address --node-private-key-file=/app/key --to=/app/out/key.adr --ec-curve=secp256k1
+
+  besu-keygen:
+    image: alpine/besu-utils
+    environment:
+      - OUTPUT_FOLDER=${OUTPUT_FOLDER:-}
+    volumes:
+      - ${OUTPUT_FOLDER:-/tmp}:/app/out
+    working_dir: /app
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ -z "$${OUTPUT_FOLDER}" ] || [ "$${OUTPUT_FOLDER}" == "tmp" ]; then
+          echo "Error: OUTPUT_FOLDER environment variable is mandatory."
+          exit 1
+        fi
+
+        NODE_KEY=/app/out/key
+        NODE_CRT=/app/out/cert.pem
+        NODE_KEYPUB=/app/out/key.pub
+        
+        openssl ecparam -name secp256k1 -genkey -noout -out "$$NODE_CRT"
+        openssl ec -in "$$NODE_CRT" -no_public -outform DER 2>/dev/null | tail -c +8 | head -c 32 | od -An -tx1 -v | tr -d " \n" > "$$NODE_KEY"
+        openssl ec -in "$$NODE_CRT" -text -noout 2>/dev/null | grep pub -A 5 | tail -n +2 | tr -d "\n[:space:]:" | sed "s/^04//" > "$$NODE_KEYPUB"
+        
+        chmod 644 "$$NODE_KEY" "$$NODE_CRT" "$$NODE_KEYPUB"
+
+  certificate-ca-signed:
+    image: alpine/besu-utils
+    environment:
+      - OUTPUT_FOLDER=${OUTPUT_FOLDER:-}
+      - CA_P12=${CA_P12:-}
+      - CA_PASS=${CA_PASS:-}
+      - P12_PASSWORD=${P12_PASSWORD:-}
+      - VALIDITY_DAYS=${VALIDITY_DAYS:-365}
+      - SUBJECT=${SUBJECT:-/CN=MyTestCA/C=IT/O=MyOrg}
+      - EXTENSION=${EXTENSION:-subjectAltName=DNS:my-test}
+      - NAME=${NAME:-Test CA}
+    volumes:
+      - ${OUTPUT_FOLDER:-/tmp}:/app/out
+      - ${CA_P12:-/dev/null}:/app/ca.cert.p12:ro
+    working_dir: /app
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        if [ -z "$$CA_P12" ] || [ "$$CA_P12" = "/dev/null" ]; then
+          echo "Error: CA_P12 environment variable is mandatory."
+          exit 1
+        fi
+
+        if [ -z "${OUTPUT_FOLDER}" ] || [ "${OUTPUT_FOLDER}" == "tmp" ]; then
+          echo "Error: OUTPUT_FOLDER environment variable is mandatory."
+          exit 1
+        fi
+
+        CA_CRT_FILE=/tmp/ca-cert.pem
+        CA_KEY_FILE=/tmp/ca-key.pem
+
+        openssl pkcs12 -in "/app/ca.cert.p12" -clcerts -nokeys -out "$$CA_CRT_FILE" -passin pass:"$$CA_PASS" -nodes
+        openssl pkcs12 -in "/app/ca.cert.p12" -nocerts -out "$$CA_KEY_FILE" -passin pass:"$$CA_PASS" -nodes
+
+        NODE_KEY=/app/out/key
+        NODE_CSR=/tmp/request.csr
+        NODE_CRT=/app/out/cert.pem
+        NODE_P12=/app/out/cert.p12
+        NODE_PASS=/app/out/password.txt
+
+        echo -n "$$P12_PASSWORD" > "$$NODE_PASS" 
+
+        openssl ecparam -name prime256v1 -genkey -noout -out "$$NODE_KEY"
+        openssl req -new -key "$$NODE_KEY" -out "$$NODE_CSR" -subj "$$SUBJECT" -addext "$$EXTENSION"
+        openssl x509 -req -in "$$NODE_CSR" -CA "$$CA_CRT_FILE" -CAkey "$$CA_KEY_FILE" -CAcreateserial -out "$$NODE_CRT" -days "$$VALIDITY_DAYS" -sha256 -copy_extensions copy
+        openssl pkcs12 -export -out "$$NODE_P12" -inkey "$$NODE_KEY" -in "$$NODE_CRT" -certfile "$$CA_CRT_FILE" -name "$$NAME" -passout pass:"$$P12_PASSWORD"
+
+        rm "$$NODE_CSR" "$$CA_CRT_FILE" "$$CA_KEY_FILE"
+        chmod 644 "$$NODE_KEY" "$$NODE_CRT" "$$NODE_P12" "$$NODE_PASS"
+
+  certificate-self-signed:
+    image: alpine/besu-utils
+    environment:
+      - OUTPUT_FOLDER=${OUTPUT_FOLDER:-}
+      - P12_PASSWORD=${P12_PASSWORD:-}
+      - VALIDITY_DAYS=${VALIDITY_DAYS:-365}
+      - SUBJECT=${SUBJECT:-/CN=MyTestCA/C=IT/O=MyOrg}
+      - NAME=${NAME:-Test CA}
+    volumes:
+      - ${OUTPUT_FOLDER:-/tmp}:/app/out
+    working_dir: /app
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        if [ -z "$$OUTPUT_FOLDER" ] || [ "$$OUTPUT_FOLDER" = "/tmp" ]; then
+           echo "Error: OUTPUT_FOLDER environment variable is mandatory."
+           exit 1
+        fi
+
+        CA_DIR=/app/out
+        CA_KEY=$$CA_DIR/key
+        CA_CRT=$$CA_DIR/cert.pem
+        CA_P12=$$CA_DIR/cert.p12
+
+        mkdir -p "$$CA_DIR"
+
+        openssl ecparam -name prime256v1 -genkey -noout -out "$$CA_KEY"
+        openssl req -x509 -new -nodes -key "$$CA_KEY" -sha256 -days "$$VALIDITY_DAYS" -out "$$CA_CRT" -subj "$$SUBJECT"
+        openssl pkcs12 -export -out "$$CA_P12" -inkey "$$CA_KEY" -in "$$CA_CRT" -name "$$NAME" -passout pass:"$$P12_PASSWORD"
+
+        chmod 644 "$$CA_KEY" "$$CA_CRT" "$$CA_P12"
+
+  genesis-alloc-contract:
+    image: alpine/besu-utils
+    environment:
+      - CONTRACT_MANIFEST=${CONTRACT_MANIFEST:-}
+      - CONTRACTS_REGISTRY=${CONTRACTS_REGISTRY:-}
+      - OUTPUT_FOLDER=${OUTPUT_FOLDER:-}
+      - BALANCE=0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+      - STORAGE={}
+    volumes:
+      - ${CONTRACT_MANIFEST:-/dev/null}:/app/contract-manifest.json:ro
+      - ${CONTRACTS_REGISTRY:-/dev/null}:/app/genesis-contracts.json:ro
+      - ${OUTPUT_FOLDER:-/tmp}:/app/out
+    working_dir: /app
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        if [ -z "$$CONTRACT_MANIFEST" ] || [ "$$CONTRACT_MANIFEST" = "/dev/null" ]; then
+          echo "Error: CONTRACT_MANIFEST environment variable is mandatory for this service."
+          exit 1
+        fi
+        if [ -z "$$CONTRACTS_REGISTRY" ] || [ "$$CONTRACTS_REGISTRY" = "/dev/null" ]; then
+          echo "Error: CONTRACTS_REGISTRY environment variable is mandatory for this service."
+          exit 1
+        fi
+        if [ -z "$$OUTPUT_FOLDER" ] || [ "$$OUTPUT_FOLDER" = "/tmp" ]; then
+           echo "Error: OUTPUT_FOLDER environment variable is mandatory."
+           exit 1
+        fi     
+        
+        OUTPUT_FILE="/app/out/genesis-alloc.json"
+
+        CONTRACT_NAME="$$(jq -r '
+          .metadata.settings.compilationTarget // {} | 
+          to_entries[0].value // "UnknownContract"
+        ' /app/contract-manifest.json)"
+        
+        GEN_ADDR="$$(jq -r --arg name "$$CONTRACT_NAME" '.[$$name].address // empty' /app/genesis-contracts.json)"
+        
+        if [ -z "$$GEN_ADDR" ]; then
+          echo "Error: Contract '$$CONTRACT_NAME' not found in genesis-contracts.json"
+          exit 1
+        fi
+
+        if [ ! -f "$$OUTPUT_FILE" ]; then
+          echo "{}" > "$$OUTPUT_FILE"
+        fi
+        
+        jq \
+          --arg addr "$$GEN_ADDR" \
+          --arg bal "$$BALANCE" \
+          --argjson store "$$STORAGE" \
+          --slurpfile src "/app/contract-manifest.json" \
+          '. + {
+            ($$addr): {
+              balance: $$bal,
+              storage: $$store,
+              code: ($$src[0].deployedBytecode.object // $$src[0].deployedCode)
+            }
+          }' "$$OUTPUT_FILE" > "$$OUTPUT_FILE.tmp" && mv "$$OUTPUT_FILE.tmp" "$$OUTPUT_FILE"
+
+  genesis-contracts-registry:
+    image: alpine/besu-utils
+    environment:
+      - INPUT_FILE=${INPUT_FILE:-}
+      - OUTPUT_FOLDER=${OUTPUT_FOLDER:-}
+    volumes:
+      - ${INPUT_FILE:-/dev/null}:/app/input.json:ro
+      - ${OUTPUT_FOLDER:-/tmp}:/app/out
+    working_dir: /app
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        if [ -z "$$INPUT_FILE" ] || [ "$$INPUT_FILE" = "/dev/null" ]; then
+          echo "Error: INPUT_FILE environment variable is mandatory for this service."
+          exit 1
+        fi
+        if [ -z "$$OUTPUT_FOLDER" ] || [ "$$OUTPUT_FOLDER" = "/tmp" ]; then
+           echo "Error: OUTPUT_FOLDER environment variable is mandatory."
+           exit 1
+        fi
+
+        CONTRACTS_FILE="/app/out/genesis-contracts.json"
+
+        ADDR_HEX="$$(od -An -N20 -tx1 /dev/urandom | tr -d ' \n' | tr 'A-F' 'a-f')"
+        HASH="$$(printf "%s" "$$ADDR_HEX" | openssl dgst -KECCAK-256 | sed 's/^.*= //')"
+
+        OUT=""
+        i=1
+        while [ "$$i" -le 40 ]; do
+          c="$$(printf "%s" "$$ADDR_HEX" | cut -c "$$i")"
+          h="$$(printf "%s" "$$HASH" | cut -c "$$i")"
+          case "$$c" in
+            [a-f])
+              case "$$h" in
+                [89abcdef]) c="$$(printf "%s" "$$c" | tr 'a-f' 'A-F')" ;;
+              esac
+            ;;
+          esac
+          OUT="$${OUT}$${c}"
+          i=$$((i+1))
+        done
+        GEN_ADDR="0x$$OUT"
+
+        CONTRACT_NAME="$$(jq -r '
+          .metadata.settings.compilationTarget // {} | 
+          to_entries[0].value // "UnknownContract"
+        ' /app/input.json)"
+        
+        CONTRACT_ABI="$$(jq -c '.abi // []' /app/input.json)"
+        
+        if [ ! -f "$$CONTRACTS_FILE" ]; then
+          echo "{}" > "$$CONTRACTS_FILE"
+        fi
+        
+        jq \
+          --arg addr "$$GEN_ADDR" \
+          --arg name "$$CONTRACT_NAME" \
+          --argjson abi "$$CONTRACT_ABI" \
+          '. + {
+            ($$name): {
+              address: $$addr,
+              abi: $$abi
+            }
+          }' "$$CONTRACTS_FILE" > "$$CONTRACTS_FILE.tmp" && mv "$$CONTRACTS_FILE.tmp" "$$CONTRACTS_FILE"
+
+  genesis-generate:
+    image: alpine/besu-utils
+    environment:
+      - GENESIS_TEMPLATE=${GENESIS_TEMPLATE:-}
+      - GENESIS_EXTRADATA=${GENESIS_EXTRADATA:-}
+      - GENESIS_ALLOC=${GENESIS_ALLOC:-}
+      - OUTPUT_FOLDER=${OUTPUT_FOLDER:-}
+    volumes:
+      - ${GENESIS_TEMPLATE:-/dev/null}:/app/genesis-template.json:ro
+      - ${GENESIS_EXTRADATA:-/dev/null}:/app/extradata:ro
+      - ${GENESIS_ALLOC:-/dev/null}:/app/alloc.json:ro
+      - ${OUTPUT_FOLDER:-/tmp}:/app/out
+    working_dir: /app
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        if [ -z "$$GENESIS_TEMPLATE" ] || [ "$$GENESIS_TEMPLATE" = "/dev/null" ]; then
+          echo "Error: GENESIS_TEMPLATE environment variable is mandatory for this service."
+          exit 1
+        fi
+        if [ -z "$$OUTPUT_FOLDER" ] || [ "$$OUTPUT_FOLDER" = "/tmp" ]; then
+           echo "Error: OUTPUT_FOLDER environment variable is mandatory."
+           exit 1
+        fi
+
+        OUTPUT_FILE="/app/out/genesis.json"
+  
+        jq '.genesis' /app/genesis-template.json > /tmp/genesis.tmp
+
+        if [ -n "$$GENESIS_EXTRADATA" ] && [ "$$GENESIS_EXTRADATA" != "/dev/null" ]; then
+           EXTRA_DATA=$$(cat /app/extradata | tr -d ' \n')
+           jq --arg ed "$$EXTRA_DATA" '.extraData = $$ed' /tmp/genesis.tmp > /tmp/genesis.tmp.2 && \
+           mv /tmp/genesis.tmp.2 /tmp/genesis.tmp
+        fi
+
+        if [ -n "$$GENESIS_ALLOC" ] && [ "$$GENESIS_ALLOC" != "/dev/null" ]; then   
+           jq --slurpfile alloc /app/alloc.json '.alloc = $$alloc[0]' /tmp/genesis.tmp > /tmp/genesis.tmp.2 && \
+           mv /tmp/genesis.tmp.2 /tmp/genesis.tmp
+        fi
+
+        mv /tmp/genesis.tmp "$$OUTPUT_FILE"
+
+  genesis-qbft-extradata:
+    image: besu/local-image
+    environment:
+      - VALIDATORS_LIST=${VALIDATORS_LIST:-}
+      - OUTPUT_FOLDER=${OUTPUT_FOLDER:-}
+    volumes:
+      - ${VALIDATORS_LIST:-/dev/null}:/app/toEncode.json:ro
+      - ${OUTPUT_FOLDER:-/tmp}:/app/out
+    working_dir: /app
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        if [ -z "$$VALIDATORS_LIST" ] || [ "$$VALIDATORS_LIST" = "/dev/null" ]; then
+          echo "Error: VALIDATORS_LIST environment variable is mandatory for this service."
+          exit 1
+        fi
+        if [ -z "$$OUTPUT_FOLDER" ] || [ "$$OUTPUT_FOLDER" = "/tmp" ]; then
+           echo "Error: OUTPUT_FOLDER environment variable is mandatory."
+           exit 1
+        fi
+        
+        besu rlp encode --from=/app/toEncode.json --to=/app/out/genesis-extradata.txt --type=QBFT_EXTRA_DATA
+
+  genesis-validators-list:
+    image: alpine/besu-utils
+    environment:
+      - ADDRESS_FILE_PATH=${ADDRESS_FILE_PATH:-}
+      - OUTPUT_FOLDER=${OUTPUT_FOLDER:-}
+    volumes:
+      - ${ADDRESS_FILE_PATH:-/dev/null}:/app/address.adr:ro
+      - ${OUTPUT_FOLDER:-/tmp}:/app/out
+    working_dir: /app/in
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        if [ -z "$${ADDRESS_FILE_PATH}" ] || [ "$${ADDRESS_FILE_PATH}" = "/dev/null" ]; then
+          echo "Error: ADDRESS_FILE_PATH environment variable is mandatory." >&2
+          exit 1
+        fi
+
+        if [ -z "$$OUTPUT_FOLDER" ] || [ "$$OUTPUT_FOLDER" = "/tmp" ]; then
+           echo "Error: OUTPUT_FOLDER environment variable is mandatory."
+           exit 1
+        fi
+
+        LIST_FILE=/app/out/validators-list.json
+
+        if [ ! -f "$${LIST_FILE}" ]; then
+          echo "[]" > "$${LIST_FILE}"
+        fi
+        
+        if [ -f "/app/address.adr" ]; then
+          newcontent=$$(cat "/app/address.adr" | tr -d ' ')
+          tmplist=$$(mktemp)
+          jq --rawfile newcontent <(echo -n "$${newcontent}") '. + [$$newcontent]' "$${LIST_FILE}" > "$${tmplist}"
+          mv "$${tmplist}" "$${LIST_FILE}"
+        else
+          echo "Warning: Address file not found at /app/address.adr"
+          exit 1
+        fi
+
+        chmod 644 "$$LIST_FILE"
+
+  rpc-auth-toml:
+    image: alpine/besu-utils
+    environment:
+      - USERNAME=${USERNAME:-}
+      - PASSWORD=${PASSWORD:-}
+      - PERMISSIONS=${PERMISSIONS:-}
+      - OUTPUT_FOLDER=${OUTPUT_FOLDER:-}
+    volumes:
+      - ${OUTPUT_FOLDER:-/tmp}:/app/out
+    working_dir: /app
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        if [ -z "$$USERNAME" ]; then echo "Error: USERNAME is mandatory."; exit 1; fi
+        if [ -z "$$PASSWORD" ]; then echo "Error: PASSWORD is mandatory."; exit 1; fi
+        if [ -z "$$PERMISSIONS" ]; then echo "Error: PERMISSIONS is mandatory."; exit 1; fi
+        if [ -z "$$OUTPUT_FOLDER" ]; then echo "Error: OUTPUT_FOLDER is mandatory."; exit 1; fi
+
+        OUTPUT_FILE="/app/out/auth.toml"
+
+        HASH=$$(htpasswd -nbB -C 10 "$$USERNAME" "$$PASSWORD" | cut -d: -f2 | sed 's/^\$2y\$/\$2a\$/')
+
+        PERMS_FORMATTED=$$(echo "$$PERMISSIONS" | sed 's/,/","/g')
+
+        touch "$$OUTPUT_FILE"
+
+        awk -v user="$$USERNAME" '
+          BEGIN { printing=1 }
+          /^\[Users\./ { 
+            if ($$0 == "[Users." user "]") { printing=0 } 
+            else { printing=1 } 
+          }
+          { if (printing) print $$0 }
+        ' "$$OUTPUT_FILE" > "$${OUTPUT_FILE}.tmp" && mv "$${OUTPUT_FILE}.tmp" "$$OUTPUT_FILE"
+
+        {
+          echo ""
+          echo "[Users.$$USERNAME]"
+          echo "password = \"$$HASH\""
+          echo "permissions = [\"$$PERMS_FORMATTED\"]"
+        } >> "$$OUTPUT_FILE"
