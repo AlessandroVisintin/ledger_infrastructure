@@ -133,3 +133,12 @@ services:
     networks:
       besu-net:
         ipv4_address: 172.28.0.7
+
+  grype:
+    image: anchore/grype:latest
+    container_name: grype
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: besu/local-image:latest
+    profiles:
+      - security
